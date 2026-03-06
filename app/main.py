@@ -36,10 +36,11 @@ async def on_startup() -> None:
 
 
 async def main() -> None:
+    # Сначала роутеры с командами (/health, /check и т.д.), иначе moderation перехватит все сообщения в группе
     dp.include_router(health_router)
-    dp.include_router(moderation_router)
     dp.include_router(start_router)
     dp.include_router(onboarding_router)
+    dp.include_router(moderation_router)
     dp.include_router(panel_router)
     dp.include_router(log_setup_router)
     dp.include_router(log_actions_router)
