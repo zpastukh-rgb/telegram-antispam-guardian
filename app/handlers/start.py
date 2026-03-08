@@ -244,10 +244,17 @@ async def cb_rules(cb: CallbackQuery):
 
 @router.callback_query(F.data == CB_PANEL)
 async def cb_panel(cb: CallbackQuery):
-
+    if not cb.from_user:
+        return
     await cb.answer()
 
-    # импорт внутри чтобы не было circular import
-    from app.handlers.panel_dm import show_panel
-
-    await show_panel(cb.bot, cb.from_user.id)
+    try:
+        from app.handlers.panel_dm import show_panel
+        await show_panel(cb.bot, cb.from_user.id)
+    except Exception as e:
+        try:
+            await cb.message.answer(
+                f"❌ Не удалось открыть панель. Напиши /panel или попробуй позже.\n\nОшибка: {e!r}"
+            )
+        except Exception:
+            pass

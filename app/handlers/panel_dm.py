@@ -74,6 +74,11 @@ def _cache_get(user_id: int) -> Optional[int]:
     return msg_id
 
 
+def _cache_clear(user_id: int) -> None:
+    """Сброс кэша панели (чтобы /panel всегда показывал главный экран)."""
+    PANEL_MSG_CACHE.pop(user_id, None)
+
+
 # =========================================================
 # 2) Pending input (минуты) — TTL чтобы не залипало
 # =========================================================
@@ -484,13 +489,9 @@ async def render_main(bot, user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
                 "😈 *AntiSpam Guardian*\n\n"
                 f"Тариф: *{tariff_label}*\n"
                 "Подключено чатов: *0 из {}*\n\n"
-                "Жми *➕ Подключить чат*.\n"
-                "Я навожу порядок. Спамеры — терпят."
+                "Жми *➕ Подключить чат* — я навожу порядок."
             ).format(user.chat_limit)
-            kb = InlineKeyboardBuilder()
-            kb.button(text="➕ Подключить чат", callback_data=CB_CONNECT)
-            kb.adjust(1)
-            return txt, kb.as_markup()
+            return txt, _kb_main()
 
         selected = await _get_selected_chat(session, user_id)
         allowed = {c.id for c in chats}
@@ -501,9 +502,8 @@ async def render_main(bot, user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
             selected = chats[0].id
             await _set_selected_chat(session, user_id, selected)
         if not selected:
-            txt = "😈 Выбери чат для настройки."
-            kb = await render_pick_chat(bot, user_id, page=0)
-            return txt, kb
+            txt = "😈 *Выбери чат для настройки.*\n\nНажми *💬 Чаты* → *Сменить чат*."
+            return txt, _kb_main()
 
         chat_row = await session.get(Chat, selected)
         rule = await _get_or_create_rule(session, selected)
@@ -610,8 +610,25 @@ async def render_pick_reports_chat(bot, user_id: int) -> Tuple[str, InlineKeyboa
 # =========================================================
 
 async def show_panel(bot, user_id: int) -> None:
-    text, kb = await render_main(bot, user_id)
-    await _edit_panel(bot, user_id, text, kb)
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        text, kb = await render_main(bot, user_id)
+        await _edit_panel(bot, user_id, text, kb)
+    except Exception as e:
+        logger.exception("show_panel error: %s", e)
+        try:
+            err_text = str(e).lower()
+            hint = ""
+            if "users" in err_text or "is_log_chat" in err_text or "does not exist" in err_text:
+                hint = "\n\n_Подсказка: если БД старая — выполни миграцию: migrations/001_add_user_and_is_log_chat.sql_"
+            await bot.send_message(
+                user_id,
+                f"❌ Не удалось открыть панель.{hint}\n\nОшибка: {e!r}\n\nПопробуй /panel ещё раз.",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
 
 
 # =========================================================
@@ -625,6 +642,8 @@ async def panel_cmd(message: Message):
         return
     if not message.from_user:
         return
+    # Сброс кэша, чтобы всегда открывался главный экран (5 кнопок), а не вложенное меню
+    _cache_clear(message.from_user.id)
     await show_panel(message.bot, message.from_user.id)
 
 
