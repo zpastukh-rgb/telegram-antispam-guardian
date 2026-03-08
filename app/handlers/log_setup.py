@@ -161,7 +161,10 @@ async def cb_log_make(cb: CallbackQuery):
 
         res = await session.execute(
             select(Chat)
-            .where(Chat.is_active == True)  # noqa
+            .where(
+                Chat.is_active == True,  # noqa: E712
+                Chat.is_log_chat == False,  # noqa: E712 — только защищаемые
+            )
             .order_by(Chat.id.asc())
         )
 
@@ -248,6 +251,22 @@ async def cb_log_bind(cb: CallbackQuery):
             return
 
         chat_row.log_chat_id = log_chat_id
+
+        # зарегистрировать группу L как лог-чат пользователя (чтобы она была в «Куда слать»)
+        log_chat_row = await session.get(Chat, log_chat_id)
+        if not log_chat_row:
+            log_chat_row = Chat(
+                id=log_chat_id,
+                owner_user_id=cb.from_user.id,
+                is_log_chat=True,
+                is_active=False,
+                title=cb.message.chat.title,
+            )
+            session.add(log_chat_row)
+        else:
+            log_chat_row.is_log_chat = True
+            log_chat_row.owner_user_id = cb.from_user.id
+            log_chat_row.title = cb.message.chat.title
 
         await session.commit()
 

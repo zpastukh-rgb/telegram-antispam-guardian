@@ -17,6 +17,7 @@ from aiogram.enums import ChatType, ChatMemberStatus
 
 from app.db.session import get_session
 from app.db.models import Chat, Rule
+from app.services.user_service import get_or_create_user, can_add_chat
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -277,6 +278,66 @@ async def cb_panel(cb: CallbackQuery):
 
 
 # =========================================================
+# /SETLOG
+# =========================================================
+
+@router.message(Command(commands=["setlog"], ignore_mention=True))
+async def setlog_command(message: Message):
+    """Регистрирует текущую группу как лог-чат (куда слать отчёты)."""
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return
+    if not message.from_user:
+        return
+
+    try:
+        member = await message.bot.get_chat_member(
+            message.chat.id,
+            message.from_user.id,
+        )
+    except Exception:
+        await message.answer("❌ Не смог проверить права.")
+        return
+
+    if member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
+        await message.answer("❌ Только админ может вызвать /setlog.")
+        return
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    async with await get_session() as session:
+        await get_or_create_user(
+            session,
+            message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+        )
+        chat = await session.get(Chat, message.chat.id)
+        if not chat:
+            chat = Chat(
+                id=message.chat.id,
+                title=message.chat.title,
+                owner_user_id=message.from_user.id,
+                is_log_chat=True,
+                is_active=False,
+            )
+            session.add(chat)
+        else:
+            chat.is_log_chat = True
+            chat.title = message.chat.title
+            chat.owner_user_id = message.from_user.id
+        await session.commit()
+
+    await message.answer(
+        "✅ *Эта группа теперь лог-чат.*\n\n"
+        "В панели управления: *Отчёты* → *Куда слать* — выбери эту группу для нужного чата.",
+        parse_mode="Markdown",
+    )
+
+
+# =========================================================
 # /CHECK
 # =========================================================
 
@@ -367,6 +428,28 @@ async def check_command(message: Message):
         )
         return
 
+    # проверка лимита чатов по тарифу
+    try:
+        async with await get_session() as session:
+            await get_or_create_user(
+                session,
+                message.from_user.id,
+                username=message.from_user.username,
+                first_name=message.from_user.first_name,
+            )
+            can_add, current_count, limit = await can_add_chat(session, message.from_user.id)
+            if not can_add:
+                await message.answer(
+                    f"❌ Лимит чатов: {current_count} из {limit}.\n\n"
+                    "Повысь тариф в панели: *Тариф и оплата*.",
+                    parse_mode="Markdown",
+                )
+                return
+    except Exception as e:
+        print("### CHECK STOP: limit_check_error", repr(e), flush=True)
+        await message.answer("❌ Ошибка проверки лимита. Попробуй позже.")
+        return
+
     # сохранение чата
     try:
         async with await get_session() as session:
@@ -378,6 +461,7 @@ async def check_command(message: Message):
                     title=message.chat.title,
                     owner_user_id=message.from_user.id,
                     is_active=True,
+                    is_log_chat=False,
                 )
                 session.add(chat)
                 print("### CHECK DB: new_chat_added", message.chat.id, flush=True)
@@ -385,6 +469,7 @@ async def check_command(message: Message):
                 chat.title = message.chat.title
                 chat.owner_user_id = message.from_user.id
                 chat.is_active = True
+                chat.is_log_chat = False
                 print("### CHECK DB: chat_exists_updated", message.chat.id, flush=True)
 
             rule = await session.get(Rule, message.chat.id)

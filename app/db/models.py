@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import enum
+from datetime import datetime
+
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -28,6 +30,12 @@ class ActionMode(str, enum.Enum):
     ban = "ban"
 
 
+class Tariff(str, enum.Enum):
+    FREE = "free"
+    PRO = "pro"
+    BUSINESS = "business"
+
+
 # =========================================================
 # BASE
 # =========================================================
@@ -37,7 +45,32 @@ class Base(DeclarativeBase):
 
 
 # =========================================================
-# CHAT (главная таблица)
+# USER (SaaS-пользователь, подписка, лимиты)
+# =========================================================
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    tariff: Mapped[str] = mapped_column(String(32), default=Tariff.FREE.value)
+    chat_limit: Mapped[int] = mapped_column(Integer, default=1)
+    subscription_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(32), default="active")
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now()
+    )
+
+
+# =========================================================
+# CHAT (главная таблица: защищаемые и лог-чаты)
 # =========================================================
 
 class Chat(Base):
@@ -45,13 +78,16 @@ class Chat(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
 
-    # кто подключил чат
+    # кто подключил чат (владелец)
     owner_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
 
-    # куда слать логи
+    # True = эта группа только лог-чат (зарегистрирована через /setlog)
+    is_log_chat: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # куда слать логи (только для защищаемых чатов)
     log_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
-    # включен ли антиспам
+    # включен ли антиспам (для защищаемых)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # служебные данные
@@ -305,3 +341,29 @@ class ModerationLog(Base):
     __table_args__ = (
         Index("idx_modlog_chat", "chat_id"),
     )
+
+
+# =========================================================
+# PAYMENT (история оплат, задел под интеграцию)
+# =========================================================
+
+class Payment(Base):
+    __tablename__ = "payments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+
+    amount: Mapped[float] = mapped_column(nullable=False)
+    currency: Mapped[str] = mapped_column(String(8), default="RUB")
+    months: Mapped[int] = mapped_column(Integer)
+    tariff: Mapped[str] = mapped_column(String(32))
+
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    payment_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now()
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

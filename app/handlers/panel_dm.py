@@ -14,6 +14,7 @@ from sqlalchemy import select, or_
 
 from app.db.session import get_session
 from app.db.models import Chat, Rule, UserContext, ChatManager
+from app.services.user_service import get_or_create_user, TARIFF_CHAT_LIMITS
 
 
 router = Router()
@@ -115,18 +116,25 @@ def _pending_clear(user_id: int) -> None:
 # =========================================================
 
 CB_MAIN = "p:main"
+CB_PROTECTION = "p:protection"   # подменю Защита
 
-# Навигация/разделы
+# Навигация/разделы (внутри Защита)
 CB_FILTERS = "p:filters"
 CB_PUNISH = "p:punish"
 CB_NEWBIE = "p:newbie"
-CB_REPORTS = "p:reports"
 CB_STOPWORDS = "p:stopwords"
+CB_RAID = "p:raid"               # анти-рейд (заглушка PRO)
+
+CB_REPORTS = "p:reports"
 
 CB_BACK = "p:back"
 
-# Чаты
-CB_PICK_CHAT = "p:pick_chat"
+# Чаты (подменю)
+CB_CHATS = "p:chats"
+CB_CHATS_LIST = "p:chats_list"   # подключённые
+CB_CHATS_LOGS = "p:chats_logs"  # лог-чаты
+CB_PICK_CHAT = "p:pick_chat"    # сменить чат
+CB_BILLING = "p:billing"        # Тариф и оплата
 CB_CHAT_PAGE = "p:chat_page:"
 CB_SET_CHAT = "p:set_chat:"
 
@@ -206,20 +214,32 @@ async def _set_selected_chat(session, user_id: int, chat_id: Optional[int]) -> N
 
 async def _managed_chats(session, user_id: int) -> List[Chat]:
     """
-    Пользователь видит ТОЛЬКО свои чаты:
-    - owner_user_id == user_id
-    - или он назначен менеджером через ChatManager
+    Только защищаемые чаты (не лог-чаты):
+    owner_user_id == user_id или менеджер через ChatManager.
     """
     sub = select(ChatManager.chat_id).where(ChatManager.user_id == user_id).subquery()
-
     res = await session.execute(
         select(Chat)
         .where(
+            Chat.is_log_chat == False,  # noqa: E712
             Chat.is_active == True,  # noqa: E712
             or_(
                 Chat.owner_user_id == user_id,
                 Chat.id.in_(select(sub.c.chat_id)),
             ),
+        )
+        .order_by(Chat.id.asc())
+    )
+    return list(res.scalars().all())
+
+
+async def _user_log_chats(session, user_id: int) -> List[Chat]:
+    """Лог-чаты пользователя (где был выполнен /setlog)."""
+    res = await session.execute(
+        select(Chat)
+        .where(
+            Chat.is_log_chat == True,  # noqa: E712
+            Chat.owner_user_id == user_id,
         )
         .order_by(Chat.id.asc())
     )
@@ -320,20 +340,38 @@ def _kb_cancel() -> InlineKeyboardMarkup:
 
 
 def _kb_main() -> InlineKeyboardMarkup:
+    """Главное меню: 5 кнопок (по ТЗ)."""
     b = InlineKeyboardBuilder()
-
-    b.button(text="🧹 Фильтры", callback_data=CB_FILTERS)
-    b.button(text="⚙️ Наказания", callback_data=CB_PUNISH)
-
-    b.button(text="👶 Новички", callback_data=CB_NEWBIE)
+    b.button(text="🛡 Защита", callback_data=CB_PROTECTION)
     b.button(text="🧾 Отчёты", callback_data=CB_REPORTS)
-
-    b.button(text="🧠 Стоп-слова", callback_data=CB_STOPWORDS)
-    b.button(text="🔁 Сменить чат", callback_data=CB_PICK_CHAT)
-
+    b.button(text="💬 Чаты", callback_data=CB_CHATS)
+    b.button(text="💳 Тариф и оплата", callback_data=CB_BILLING)
     b.button(text="➕ Подключить чат", callback_data=CB_CONNECT)
+    b.adjust(1)
+    return b.as_markup()
 
-    b.adjust(2, 2, 2, 1)
+
+def _kb_protection() -> InlineKeyboardMarkup:
+    """Вложенное меню Защита: Фильтры, Наказания, Новички, Стоп-слова, Анти-рейд."""
+    b = InlineKeyboardBuilder()
+    b.button(text="⚙ Фильтры", callback_data=CB_FILTERS)
+    b.button(text="🔨 Наказания", callback_data=CB_PUNISH)
+    b.button(text="👶 Новички", callback_data=CB_NEWBIE)
+    b.button(text="🧠 Стоп-слова", callback_data=CB_STOPWORDS)
+    b.button(text="🚨 Анти-рейд", callback_data=CB_RAID)
+    b.button(text="⬅️ Назад", callback_data=CB_MAIN)
+    b.adjust(2, 2, 1, 1)
+    return b.as_markup()
+
+
+def _kb_chats() -> InlineKeyboardMarkup:
+    """Подменю Чаты: Подключённые, Сменить чат, Лог-чаты."""
+    b = InlineKeyboardBuilder()
+    b.button(text="🛡 Подключённые чаты", callback_data=CB_CHATS_LIST)
+    b.button(text="🔄 Сменить чат", callback_data=CB_PICK_CHAT)
+    b.button(text="📍 Лог-чаты", callback_data=CB_CHATS_LOGS)
+    b.button(text="⬅️ Назад", callback_data=CB_MAIN)
+    b.adjust(1)
     return b.as_markup()
 
 
@@ -353,7 +391,7 @@ def _kb_filters(rule: Rule) -> InlineKeyboardMarkup:
         text=f"✏️ Anti-edit: {'ВКЛ' if rule.anti_edit else 'ВЫКЛ'}",
         callback_data=CB_TOGGLE_ANTIEDIT,
     )
-    b.button(text="⬅️ Назад", callback_data=CB_MAIN)
+    b.button(text="⬅️ Назад", callback_data=CB_PROTECTION)
 
     b.adjust(2, 2)
     return b.as_markup()
@@ -368,7 +406,7 @@ def _kb_punish(rule: Rule) -> InlineKeyboardMarkup:
     b.button(text=f"😈 Режим: {mode}", callback_data=CB_MODE)
     b.button(text=f"🔇 Мут: {mute_min}м", callback_data=CB_SET_MUTE_MIN)
 
-    b.button(text="⬅️ Назад", callback_data=CB_MAIN)
+    b.button(text="⬅️ Назад", callback_data=CB_PROTECTION)
 
     b.adjust(2, 1)
     return b.as_markup()
@@ -387,7 +425,7 @@ def _kb_newbie(rule: Rule) -> InlineKeyboardMarkup:
         text=f"⏱ Окно: {newbie_min}м",
         callback_data=CB_SET_NEWBIE_MIN,
     )
-    b.button(text="⬅️ Назад", callback_data=CB_MAIN)
+    b.button(text="⬅️ Назад", callback_data=CB_PROTECTION)
     b.adjust(2, 1)
     return b.as_markup()
 
@@ -410,7 +448,15 @@ def _kb_reports(rule: Rule) -> InlineKeyboardMarkup:
 
 def _kb_stopwords_stub() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="⬅️ Назад", callback_data=CB_MAIN)
+    b.button(text="⬅️ Назад", callback_data=CB_PROTECTION)
+    b.adjust(1)
+    return b.as_markup()
+
+
+def _kb_raid_stub() -> InlineKeyboardMarkup:
+    """Анти-рейд: заглушка (тариф PRO)."""
+    b = InlineKeyboardBuilder()
+    b.button(text="⬅️ Назад", callback_data=CB_PROTECTION)
     b.adjust(1)
     return b.as_markup()
 
@@ -419,35 +465,41 @@ def _kb_stopwords_stub() -> InlineKeyboardMarkup:
 # RENDER SCREENS
 # =========================================================
 
+def _format_subscription_until(until) -> str:
+    if until is None:
+        return "—"
+    if hasattr(until, "strftime"):
+        return until.strftime("%d.%m.%Y")
+    return str(until)
+
+
 async def render_main(bot, user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
     async with await get_session() as session:
+        user = await get_or_create_user(session, user_id)
         chats = await _managed_chats(session, user_id)
 
         if not chats:
+            tariff_label = (user.tariff or "FREE").upper()
             txt = (
                 "😈 *AntiSpam Guardian*\n\n"
-                "У тебя пока нет подключённых чатов.\n\n"
+                f"Тариф: *{tariff_label}*\n"
+                "Подключено чатов: *0 из {}*\n\n"
                 "Жми *➕ Подключить чат*.\n"
                 "Я навожу порядок. Спамеры — терпят."
-            )
+            ).format(user.chat_limit)
             kb = InlineKeyboardBuilder()
             kb.button(text="➕ Подключить чат", callback_data=CB_CONNECT)
             kb.adjust(1)
             return txt, kb.as_markup()
 
         selected = await _get_selected_chat(session, user_id)
-
         allowed = {c.id for c in chats}
         if selected and selected not in allowed:
             selected = None
             await _set_selected_chat(session, user_id, None)
-
-        # автоселект если 1 чат
         if not selected and len(chats) == 1:
             selected = chats[0].id
             await _set_selected_chat(session, user_id, selected)
-
-        # если не выбран — отправим в выбор
         if not selected:
             txt = "😈 Выбери чат для настройки."
             kb = await render_pick_chat(bot, user_id, page=0)
@@ -455,28 +507,26 @@ async def render_main(bot, user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
 
         chat_row = await session.get(Chat, selected)
         rule = await _get_or_create_rule(session, selected)
-
         title = (getattr(chat_row, "title", None) or "").strip() if chat_row else ""
         if not title:
             title = await _get_chat_title(bot, selected)
 
         reports_on = bool(rule.log_enabled)
         reports_chat_id = getattr(chat_row, "log_chat_id", None) if chat_row else None
-        reports_where = "не настроено"
+        reports_where = "не выбран"
         if reports_chat_id:
             reports_where = await _get_chat_title(bot, int(reports_chat_id))
 
+        tariff_label = (user.tariff or "FREE").upper()
+        sub_until = _format_subscription_until(user.subscription_until)
+
         txt = (
-            "😈 *Панель AntiSpam Guardian*\n\n"
-            f"🛡 *Чат:* {title}\n"
-            f"🧾 *Отчёты:* {'ВКЛ' if reports_on else 'ВЫКЛ'} → {reports_where}\n\n"
-            f"⚙️ *Режим:* {_human_mode(rule.action_mode)}\n"
-            f"🔇 *Мут:* {int(rule.mute_minutes or 30)} мин\n"
-            f"✏️ *Anti-edit:* {'ВКЛ' if rule.anti_edit else 'ВЫКЛ'}\n"
-            f"👶 *Новичок:* {'ВКЛ' if rule.newbie_enabled else 'ВЫКЛ'} (окно {int(rule.newbie_minutes or 10)} мин)\n"
-            f"🔗 *Ссылки:* {'РЕЖУ' if rule.filter_links else 'НЕ'}\n"
-            f"🏷 *@:* {'РЕЖУ' if rule.filter_mentions else 'НЕ'}\n\n"
-            "_Жми кнопки — я обновляю это же сообщение. Без мусора._"
+            "😈 *AntiSpam Guardian*\n\n"
+            f"Тариф: *{tariff_label}*  |  Подключено: *{len(chats)} из {user.chat_limit}*\n"
+            f"Подписка до: *{sub_until}*\n\n"
+            f"🛡 *Текущий чат:* {title}\n"
+            f"🧾 *Лог-чат:* {reports_where}\n\n"
+            "_Защита, отчёты, чаты — кнопки ниже._"
         )
         return txt, _kb_main()
 
@@ -505,37 +555,42 @@ async def render_pick_chat(bot, user_id: int, page: int = 0) -> InlineKeyboardMa
         title = (ch.title or "").strip() or str(ch.id)
         b.button(text=f"🛡 {title}", callback_data=f"{CB_SET_CHAT}{ch.id}")
 
-    # pagination row
-    nav = InlineKeyboardBuilder()
-    if page > 0:
-        nav.button(text="⬅️", callback_data=f"{CB_CHAT_PAGE}{page-1}")
-    nav.button(text=f"📄 {page+1}/{max_page+1}", callback_data="noop:0")
-    if page < max_page:
-        nav.button(text="➡️", callback_data=f"{CB_CHAT_PAGE}{page+1}")
-
-    # добавим навигацию как отдельный ряд
-    # (InlineKeyboardBuilder не умеет "вставить ряд", поэтому просто добавим кнопки и adjust)
-    for btn_row in nav.export():
-        for btn in btn_row:
-            b.add(btn)
+    # пагинация только если больше одной страницы (убрать кнопку 1/1)
+    if max_page > 0:
+        nav = InlineKeyboardBuilder()
+        if page > 0:
+            nav.button(text="⬅️", callback_data=f"{CB_CHAT_PAGE}{page-1}")
+        nav.button(text=f"📄 {page+1}/{max_page+1}", callback_data="noop:0")
+        if page < max_page:
+            nav.button(text="➡️", callback_data=f"{CB_CHAT_PAGE}{page+1}")
+        for btn_row in nav.export():
+            for btn in btn_row:
+                b.add(btn)
 
     b.button(text="⬅️ Назад", callback_data=CB_MAIN)
-    b.adjust(1, 1, 1, 1, 1, 1, 3, 1)  # чат-кнопки по 1, потом ряд пагинации 3, потом назад
+    b.adjust(1)
     return b.as_markup()
 
 
 async def render_pick_reports_chat(bot, user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """Куда слать отчёты — только лог-чаты (где был /setlog)."""
     async with await get_session() as session:
         selected = await _get_selected_chat(session, user_id)
         if not selected:
-            return "😈 Сначала выбери чат.", _kb_back_to_main()
+            return "😈 Сначала выбери защищаемый чат.", _kb_back_to_main()
 
-        chats = await _managed_chats(session, user_id)
-        if not chats:
-            return "😈 Нет доступных чатов.", _kb_back_to_main()
+        log_chats = await _user_log_chats(session, user_id)
+        if not log_chats:
+            return (
+                "😈 *Нет лог-чатов.*\n\n"
+                "1) Создай группу для логов\n"
+                "2) Добавь туда бота, дай права\n"
+                "3) В той группе напиши: /setlog\n"
+                "4) Вернись сюда и выбери её.",
+                _kb_back_to_main(),
+            )
 
-        # Собираем id и title внутри сессии (объекты Chat после выхода из session отвязываются)
-        chat_items = [(ch.id, (ch.title or "").strip() or str(ch.id)) for ch in chats]
+        chat_items = [(ch.id, (ch.title or "").strip() or str(ch.id)) for ch in log_chats]
 
     b = InlineKeyboardBuilder()
     b.button(text="🚫 Не слать отчёты (снять)", callback_data=CB_CLEAR_REPORTS_CHAT)
@@ -547,7 +602,7 @@ async def render_pick_reports_chat(bot, user_id: int) -> Tuple[str, InlineKeyboa
 
     b.button(text="⬅️ Назад", callback_data=CB_REPORTS)
     b.adjust(1)
-    return "🧾 *Куда слать отчёты?*\nВыбери чат/группу:", b.as_markup()
+    return "🧾 *Куда слать отчёты?*\nТолько лог-чаты (где был /setlog):", b.as_markup()
 
 
 # =========================================================
@@ -586,6 +641,106 @@ async def cb_noop(cb: CallbackQuery):
 async def cb_main(cb: CallbackQuery):
     await cb.answer()
     await show_panel(cb.bot, cb.from_user.id)
+
+
+@router.callback_query(F.data == CB_PROTECTION)
+async def cb_protection(cb: CallbackQuery):
+    await cb.answer()
+    chat_id = await _get_selected_or_alert(cb)
+    if not chat_id:
+        return
+    async with await get_session() as session:
+        chat_row = await session.get(Chat, chat_id)
+    title = (getattr(chat_row, "title", None) or "").strip() if chat_row else str(chat_id)
+    if not title:
+        title = await _get_chat_title(cb.bot, chat_id)
+    txt = f"🛡 *Защита*\n\nЧат: *{title}*\n\nФильтры, наказания, новички, стоп-слова, анти-рейд."
+    await _edit_or_send(cb, txt, _kb_protection())
+
+
+@router.callback_query(F.data == CB_RAID)
+async def cb_raid(cb: CallbackQuery):
+    await cb.answer()
+    txt = (
+        "🚨 *Анти-рейд*\n\n"
+        "Защита от массового входа ботов и рейдов.\n\n"
+        "🔒 Доступно на тарифе *PRO*.\n"
+        "Повысь тариф в разделе *Тариф и оплата*."
+    )
+    await _edit_or_send(cb, txt, _kb_raid_stub())
+
+
+@router.callback_query(F.data == CB_BILLING)
+async def cb_billing(cb: CallbackQuery):
+    await cb.answer()
+    async with await get_session() as session:
+        user = await get_or_create_user(session, cb.from_user.id)
+        count = len(await _managed_chats(session, cb.from_user.id))
+    tariff = (user.tariff or "FREE").upper()
+    sub_until = _format_subscription_until(user.subscription_until)
+    limit = user.chat_limit
+    txt = (
+        "💳 *Тариф и оплата*\n\n"
+        f"Тариф: *{tariff}*\n"
+        f"Подключено чатов: *{count} из {limit}*\n"
+        f"Подписка до: *{sub_until}*\n\n"
+        "_Оплата и смена тарифа — в следующих версиях._"
+    )
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data=CB_MAIN)
+    kb.adjust(1)
+    await _edit_or_send(cb, txt, kb.as_markup())
+
+
+@router.callback_query(F.data == CB_CHATS)
+async def cb_chats_menu(cb: CallbackQuery):
+    await cb.answer()
+    txt = "💬 *Чаты*\n\nПодключённые чаты — где бот защищает.\nЛог-чаты — куда можно слать отчёты (где был /setlog)."
+    await _edit_or_send(cb, txt, _kb_chats())
+
+
+@router.callback_query(F.data == CB_CHATS_LIST)
+async def cb_chats_list(cb: CallbackQuery):
+    await cb.answer()
+    async with await get_session() as session:
+        chats = await _managed_chats(session, cb.from_user.id)
+    if not chats:
+        txt = "🛡 *Подключённые чаты*\n\nПока нет. Жми *➕ Подключить чат* в главном меню."
+        kb = InlineKeyboardBuilder()
+        kb.button(text="⬅️ Назад", callback_data=CB_CHATS)
+        kb.adjust(1)
+        await _edit_or_send(cb, txt, kb.as_markup())
+        return
+    lines = [f"• { (c.title or '').strip() or str(c.id) }" for c in chats[:50]]
+    txt = "🛡 *Подключённые чаты*\n\n" + "\n".join(lines)
+    if len(chats) > 50:
+        txt += f"\n…и ещё {len(chats) - 50}"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data=CB_CHATS)
+    kb.adjust(1)
+    await _edit_or_send(cb, txt, kb.as_markup())
+
+
+@router.callback_query(F.data == CB_CHATS_LOGS)
+async def cb_chats_logs(cb: CallbackQuery):
+    await cb.answer()
+    async with await get_session() as session:
+        log_chats = await _user_log_chats(session, cb.from_user.id)
+    if not log_chats:
+        txt = (
+            "📍 *Лог-чаты*\n\n"
+            "Пока нет. Чтобы добавить:\n"
+            "1) Создай группу для логов\n"
+            "2) Добавь бота, дай права\n"
+            "3) В той группе напиши: /setlog"
+        )
+    else:
+        lines = [f"• {(c.title or '').strip() or str(c.id)}" for c in log_chats[:50]]
+        txt = "📍 *Лог-чаты*\n\n" + "\n".join(lines)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data=CB_CHATS)
+    kb.adjust(1)
+    await _edit_or_send(cb, txt, kb.as_markup())
 
 
 @router.callback_query(F.data == CB_PICK_CHAT)
@@ -890,11 +1045,11 @@ async def cb_set_reports_chat(cb: CallbackQuery):
         return
 
     async with await get_session() as session:
-        # безопасность: только из "твоих" чатов
-        chats = await _managed_chats(session, cb.from_user.id)
-        allowed = {c.id for c in chats}
-        if reports_chat_id not in allowed:
-            await cb.answer("Это не твой чат 😈", show_alert=True)
+        # разрешать только лог-чаты пользователя (где был /setlog)
+        log_chats = await _user_log_chats(session, cb.from_user.id)
+        allowed_log_ids = {c.id for c in log_chats}
+        if reports_chat_id not in allowed_log_ids:
+            await cb.answer("Выбери лог-чат из списка (где был /setlog) 😈", show_alert=True)
             return
 
         chat_row = await session.get(Chat, selected)
@@ -914,9 +1069,11 @@ async def cb_reports_help(cb: CallbackQuery):
         "• кого вынес\n"
         "• за что\n"
         "• что сделал (удалил/мут/бан)\n\n"
-        "Лучший вариант — отдельная группа «Отчёты».\n"
-        "Добавь туда бота админом.\n"
-        "Потом: *📍 Куда слать* → выбери эту группу.\n\n"
+        "*Как настроить:*\n"
+        "1) Создай отдельную группу для логов\n"
+        "2) Добавь туда бота, дай права\n"
+        "3) В той группе напиши: /setlog\n"
+        "4) Вернись в панель → *Куда слать* → выбери эту группу.\n\n"
         "😈 Я не болтаю. Я фиксирую наказания."
     )
     await _edit_or_send(cb, txt, _kb_back_to_main())
