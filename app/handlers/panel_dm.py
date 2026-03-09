@@ -1936,18 +1936,17 @@ def _kb_connect_reports_chat() -> ReplyKeyboardMarkup:
 
 
 def _kb_connect_request_chat() -> ReplyKeyboardMarkup:
-    """ТЗ ЧЕККК: выбор группы → Telegram добавляет бота как админа с правами."""
+    """Выбор группы: показываем чаты, где бот уже есть (bot_is_member=True — лучше работает в клиентах)."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [
                 KeyboardButton(
-                    text="📋 Выбрать группу (добавить бота)",
+                    text="📋 Выбрать группу",
                     request_chat=KeyboardButtonRequestChat(
                         request_id=CONNECT_REQUEST_ID,
                         chat_is_channel=False,
-                        bot_is_member=False,
+                        bot_is_member=True,
                         request_title=True,
-                        bot_administrator_rights=BOT_ADMIN_RIGHTS,
                     ),
                 )
             ]
@@ -1986,10 +1985,22 @@ async def cb_connect(cb: CallbackQuery):
 async def cb_connect_pick_modal(cb: CallbackQuery):
     """Отправляем сообщение с Reply-кнопкой — по нажатию откроется нативная модалка выбора чата."""
     await cb.answer()
-    await cb.message.answer(
-        "Нажми кнопку ниже — откроется список твоих групп, где уже есть бот. Выбери группу для подключения.",
-        reply_markup=_kb_connect_request_chat(),
-    )
+    try:
+        await cb.message.answer(
+            "Нажми кнопку ниже — откроется список твоих групп, где уже есть бот. Выбери группу для подключения.",
+            reply_markup=_kb_connect_request_chat(),
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("cb_connect_pick_modal reply keyboard failed: %s", e)
+        try:
+            await cb.message.answer(
+                "Кнопка «Выбрать группу» в этом клиенте может не открываться. "
+                "Добавь бота в нужную группу как админа, затем вернись сюда и выбери группу *из списка под сообщением выше* — там появятся чаты, куда ты уже добавлял бота.",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data.startswith(CB_CONNECT_CONFIRM_PREFIX))
